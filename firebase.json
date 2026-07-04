@@ -3,8 +3,13 @@
     "public": ".",
     "ignore": [
       "firebase.json",
+      "firebase-debug.log",
+      ".firebase/**",
+      ".git/**",
+      ".gitignore",
       "**/.*",
-      "**/node_modules/**"
+      "**/node_modules/**",
+      "網址.txt"
     ]
   }
 }
