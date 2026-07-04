@@ -42,6 +42,8 @@ h1 {
 .controls button:active { transform: scale(0.95); }
 .controls button.primary { background: #e94560; border-color: #e94560; }
 .controls button.success { background: #0f3460; border-color: #0f3460; }
+.controls button.hint-active { background: #f0a500; border-color: #f0a500; color: #1a1a2e; }
+.controls button.solving { background: #e94560; border-color: #e94560; }
 #fileInput { display: none; }
 .grid-selector { display: flex; gap: 6px; align-items: center; }
 .grid-selector span { font-size: 0.85rem; opacity: .8; }
@@ -65,11 +67,38 @@ h1 {
   position: relative; border-radius: 4px; cursor: pointer;
   background-size: cover; background-position: center;
   touch-action: none; -webkit-tap-highlight-color: transparent;
+  transition: box-shadow .2s;
 }
 .tile.empty { opacity: 0; pointer-events: none; }
 .tile.correct {
   box-shadow: inset 0 0 0 2px rgba(102, 126, 234, .5);
 }
+.tile.hint-wrong::after {
+  content: ''; position: absolute; inset: 0;
+  background: rgba(233, 69, 96, .25); border-radius: 4px;
+}
+.tile.hint-correct::after {
+  content: ''; position: absolute; inset: 0;
+  background: rgba(46, 213, 115, .15); border-radius: 4px;
+}
+.tile.hint-next {
+  box-shadow: 0 0 16px 4px rgba(240, 165, 0, .7);
+  z-index: 2;
+}
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 12px 2px rgba(240, 165, 0, .5); }
+  50% { box-shadow: 0 0 20px 6px rgba(240, 165, 0, .9); }
+}
+.tile.hint-next-pulse {
+  animation: pulse-glow .8s ease-in-out infinite;
+  z-index: 2;
+}
+.status-msg {
+  text-align: center; font-size: 0.8rem; padding: 4px 0; min-height: 20px;
+  opacity: .7;
+}
+.status-msg.info { color: #f0a500; opacity: 1; }
+.status-msg.done { color: #2ed573; opacity: 1; }
 .win-overlay {
   position: absolute; top: 0; left: 0; width: 100%; height: 100%;
   background: rgba(0,0,0,.7); display: none; flex-direction: column;
@@ -119,6 +148,8 @@ h1 {
     <button class="grid-btn" data-size="4">4×4</button>
   </div>
   <button id="resetBtn">⟳ 重新開始</button>
+  <button id="hintBtn">💡 提示</button>
+  <button id="autoSolveBtn">🤖 自動完成</button>
 </div>
 
 <div class="stats">
@@ -142,6 +173,8 @@ h1 {
   <img id="refImage" alt="原圖">
 </details>
 
+<div class="status-msg" id="statusMsg"></div>
+
 <div class="hint-text">
   點擊空格旁邊的區塊就能滑動<br>
   💡 先選照片 → 再按 <strong>打亂</strong> 開始
@@ -161,6 +194,9 @@ const refContainer = document.getElementById('refContainer');
 const refImage = document.getElementById('refImage');
 const gridBtns = document.querySelectorAll('.grid-btn');
 const closeBtn = document.getElementById('closeBtn');
+const hintBtn = document.getElementById('hintBtn');
+const autoSolveBtn = document.getElementById('autoSolveBtn');
+const statusMsg = document.getElementById('statusMsg');
 
 let gridSize = 3;
 let tiles = [];
@@ -171,6 +207,10 @@ let seconds = 0;
 let sourceImage = null;
 let isWin = false;
 let isMoving = false;
+let hintMode = false;
+let solutionPath = null;
+let solving = false;
+let solveTimer = null;
 
 closeBtn.addEventListener('click', () => {
   if (window.history.length > 1) { window.history.back(); }
@@ -186,11 +226,13 @@ function initSolvedState() {
   moves = 0;
   isWin = false;
   isMoving = false;
+  solutionPath = null;
   moveCountEl.textContent = '0';
   stopTimer();
   seconds = 0;
   timerEl.textContent = '00:00';
   winOverlay.classList.remove('show');
+  statusMsg.textContent = '';
 }
 
 function isAdjacent(i, j) {
@@ -217,6 +259,7 @@ function getValidMoves() {
 }
 
 function shuffle(times) {
+  stopAutoSolve();
   initSolvedState();
   const total = getTotalTiles();
   const iterations = times || total * 50;
@@ -246,6 +289,175 @@ function getTilePos(index) {
   return { x: col * step, y: row * step };
 }
 
+// --- IDA* Solver ---
+function solvePuzzle(startTiles, startEmpty, gs) {
+  const total = gs * gs;
+
+  function manhattan(state) {
+    let d = 0;
+    for (let i = 0; i < total; i++) {
+      const v = state[i];
+      if (v === total - 1) continue;
+      d += Math.abs(Math.floor(v / gs) - Math.floor(i / gs)) +
+           Math.abs((v % gs) - (i % gs));
+    }
+    return d;
+  }
+
+  function neighbors(ei) {
+    const r = Math.floor(ei / gs), c = ei % gs;
+    const res = [];
+    if (r > 0) res.push(ei - gs);
+    if (r < gs - 1) res.push(ei + gs);
+    if (c > 0) res.push(ei - 1);
+    if (c < gs - 1) res.push(ei + 1);
+    return res;
+  }
+
+  const path = [];
+  let bound = manhattan(startTiles);
+  const maxBound = gs === 3 ? 120 : 200;
+
+  function dfs(state, ei, depth, prev, b) {
+    const f = depth + manhattan(state);
+    if (f > b) return f;
+    if (manhattan(state) === 0) return -1;
+
+    let min = Infinity;
+    const nbrs = neighbors(ei);
+    for (const ni of nbrs) {
+      if (ni === prev) continue;
+      const next = state.slice();
+      next[ei] = state[ni];
+      next[ni] = state[ei];
+      path.push(ni);
+      const t = dfs(next, ni, depth + 1, ei, b);
+      if (t === -1) return -1;
+      if (t < min) min = t;
+      path.pop();
+      if (min === -1) return -1;
+    }
+    return min;
+  }
+
+  while (bound <= maxBound) {
+    const t = dfs(startTiles, startEmpty, 0, null, bound);
+    if (t === -1) return path;
+    if (t === Infinity) break;
+    bound = t;
+  }
+  return null;
+}
+
+// --- Auto Solve ---
+function startAutoSolve() {
+  if (!sourceImage) { alert('請先選擇一張照片！'); return; }
+  if (isWin) return;
+  if (solving) { stopAutoSolve(); return; }
+
+  const currentTiles = [...tiles];
+  const currentEmpty = emptyIndex;
+
+  statusMsg.textContent = '🧮 計算解答中...';
+  statusMsg.className = 'status-msg info';
+
+  setTimeout(() => {
+    const solution = solvePuzzle(currentTiles, currentEmpty, gridSize);
+    if (!solution) {
+      statusMsg.textContent = '⚠️ 無法找到解答，請重新打亂';
+      statusMsg.className = 'status-msg';
+      return;
+    }
+
+    statusMsg.textContent = `✅ 找到解答！共 ${solution.length} 步，開始自動執行...`;
+    statusMsg.className = 'status-msg info';
+    solving = true;
+    autoSolveBtn.textContent = '⏹ 停止';
+    autoSolveBtn.classList.add('solving');
+    hintMode = false;
+    hintBtn.classList.remove('hint-active');
+
+    let step = 0;
+    function doStep() {
+      if (!solving) {
+        autoSolveBtn.textContent = '🤖 自動完成';
+        autoSolveBtn.classList.remove('solving');
+        return;
+      }
+      if (step >= solution.length) {
+        solving = false;
+        autoSolveBtn.textContent = '🤖 自動完成';
+        autoSolveBtn.classList.remove('solving');
+        statusMsg.textContent = '🎉 自動完成！';
+        statusMsg.className = 'status-msg done';
+        if (checkWin()) {
+          isWin = true;
+          stopTimer();
+          winInfo.textContent = `🤖 ${gridSize}×${gridSize} · ${moves}步 · ${timerEl.textContent}`;
+          winOverlay.classList.add('show');
+        }
+        return;
+      }
+
+      if (!timerInterval) startTimer();
+
+      const ni = solution[step];
+      swap(emptyIndex, ni);
+      emptyIndex = ni;
+      moves++;
+      moveCountEl.textContent = moves;
+      render();
+      step++;
+      solveTimer = setTimeout(doStep, 200);
+    }
+    doStep();
+  }, 50);
+}
+
+function stopAutoSolve() {
+  solving = false;
+  if (solveTimer) { clearTimeout(solveTimer); solveTimer = null; }
+  autoSolveBtn.textContent = '🤖 自動完成';
+  autoSolveBtn.classList.remove('solving');
+  statusMsg.textContent = '';
+  statusMsg.className = 'status-msg';
+  isMoving = false;
+}
+
+// --- Hint Mode ---
+function toggleHint() {
+  if (!sourceImage) { alert('請先選擇一張照片！'); return; }
+  if (isWin) return;
+  if (solving) stopAutoSolve();
+  hintMode = !hintMode;
+  hintBtn.classList.toggle('hint-active', hintMode);
+
+  if (hintMode) {
+    statusMsg.textContent = '💡 提示模式：綠色=正確位置，紅色=錯誤位置';
+    statusMsg.className = 'status-msg info';
+    computeHint();
+  } else {
+    statusMsg.textContent = '';
+    statusMsg.className = 'status-msg';
+    solutionPath = null;
+    render();
+  }
+}
+
+function computeHint() {
+  if (!hintMode || isWin) return;
+  const currentTiles = [...tiles];
+  const currentEmpty = emptyIndex;
+  setTimeout(() => {
+    const sol = solvePuzzle(currentTiles, currentEmpty, gridSize);
+    if (sol && sol.length > 0) {
+      solutionPath = sol;
+      render();
+    }
+  }, 30);
+}
+
+// --- Render ---
 function render() {
   const total = getTotalTiles();
   puzzle.style.gridTemplateColumns = `repeat(${gridSize}, 1fr)`;
@@ -257,6 +469,11 @@ function render() {
 
   puzzle.innerHTML = '';
   const fragment = document.createDocumentFragment();
+
+  let nextHintIndex = -1;
+  if (hintMode && solutionPath && solutionPath.length > 0) {
+    nextHintIndex = solutionPath[0];
+  }
 
   for (let i = 0; i < total; i++) {
     const div = document.createElement('div');
@@ -271,7 +488,19 @@ function render() {
       div.style.backgroundImage = `url(${sourceImage})`;
       div.style.backgroundSize = `${gridSize * 100}%`;
       div.style.backgroundPosition = `${pos.x}% ${pos.y}%`;
-      if (val === i) div.classList.add('correct');
+
+      if (hintMode) {
+        if (val === i) {
+          div.classList.add('hint-correct');
+        } else {
+          div.classList.add('hint-wrong');
+        }
+        if (i === nextHintIndex) {
+          div.classList.add('hint-next-pulse');
+        }
+      } else {
+        if (val === i) div.classList.add('correct');
+      }
     }
 
     div.addEventListener('touchstart', (e) => {
@@ -286,7 +515,7 @@ function render() {
 }
 
 function handleTileClick(index) {
-  if (isMoving || isWin) return;
+  if (isMoving || isWin || solving) return;
   if (!sourceImage) return;
   if (index === emptyIndex) return;
   if (!isAdjacent(index, emptyIndex)) return;
@@ -298,17 +527,21 @@ function handleTileClick(index) {
   emptyIndex = index;
   moves++;
   moveCountEl.textContent = moves;
+  solutionPath = null;
   render();
 
   if (checkWin()) {
     isWin = true;
     stopTimer();
+    statusMsg.textContent = '🎉 過關了！';
+    statusMsg.className = 'status-msg done';
     setTimeout(() => {
       winInfo.textContent = `👏 ${gridSize}×${gridSize} · ${moves}步 · ${timerEl.textContent}`;
       winOverlay.classList.add('show');
       isMoving = false;
     }, 300);
   } else {
+    if (hintMode) computeHint();
     setTimeout(() => { isMoving = false; }, 100);
   }
 }
@@ -339,6 +572,9 @@ function loadImage(imgSrc) {
     sourceImage = canvas.toDataURL('image/jpeg', 0.92);
     refImage.src = sourceImage;
     refContainer.classList.add('show');
+    hintMode = false;
+    hintBtn.classList.remove('hint-active');
+    stopAutoSolve();
     initSolvedState();
     render();
   };
@@ -357,19 +593,30 @@ fileInput.addEventListener('change', (e) => {
 shuffleBtn.addEventListener('click', () => {
   if (!sourceImage) { alert('請先選擇一張照片！'); return; }
   shuffle();
+  solutionPath = null;
   render();
+  if (hintMode) computeHint();
 });
 
 resetBtn.addEventListener('click', () => {
   if (!sourceImage) { alert('請先選擇一張照片！'); return; }
+  stopAutoSolve();
   initSolvedState();
+  hintMode = false;
+  hintBtn.classList.remove('hint-active');
+  solutionPath = null;
   render();
 });
 
 winContinueBtn.addEventListener('click', () => {
   shuffle();
+  solutionPath = null;
   render();
 });
+
+hintBtn.addEventListener('click', toggleHint);
+
+autoSolveBtn.addEventListener('click', startAutoSolve);
 
 gridBtns.forEach(btn => {
   btn.addEventListener('click', () => {
@@ -377,7 +624,11 @@ gridBtns.forEach(btn => {
     btn.classList.add('active');
     gridSize = parseInt(btn.dataset.size);
     if (sourceImage) {
+      stopAutoSolve();
       initSolvedState();
+      hintMode = false;
+      hintBtn.classList.remove('hint-active');
+      solutionPath = null;
       render();
     }
   });
