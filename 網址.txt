@@ -1,8 +1,8 @@
+--- GitHub Pages ---
+https://jeff79213-baba.github.io/photo-sliding-puzzle/
+
 --- GitHub ---
 https://github.com/jeff79213-baba/photo-sliding-puzzle
-
---- Firebase Hosting ---
-https://opencode-sk.web.app
 
 --- 本地路徑 ---
 C:\Users\TW-10\Documents\firebase雲端資料夾\相簿華容道
